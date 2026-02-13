@@ -6,14 +6,63 @@ from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import DateRange, Dimension, Metric, RunReportRequest, OrderBy
 from google.oauth2 import service_account
 import datetime
+import time
 
 # --- Configuración Visual ---
-st.set_page_config(page_title="Tablero Loteria", layout="wide", page_icon="🎰")
-st.title("📊 Tablero de Control Integrado")
+st.set_page_config(page_title="Tablero Datos de la Suerte", layout="wide", page_icon="🍀")
+
+# --- SISTEMA DE LOGIN ---
+def check_password():
+    """Retorna True si el usuario ya se logueó, de lo contrario muestra formulario."""
+    
+    # 1. Si ya está validado en la sesión, retornamos True directo
+    if st.session_state.get('password_correct', False):
+        return True
+
+    # 2. Mostrar formulario de login
+    st.title("🔒 Acceso Restringido")
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        with st.form("login_form"):
+            st.markdown("### Iniciar Sesión")
+            user_input = st.text_input("Usuario")
+            password_input = st.text_input("Contraseña", type="password")
+            submit_button = st.form_submit_button("Entrar", type="primary")
+
+            if submit_button:
+                # Verificar contra los secretos
+                if user_input in st.secrets["passwords"] and \
+                   password_input == st.secrets["passwords"][user_input]:
+                    
+                    st.session_state['password_correct'] = True
+                    st.success("¡Acceso correcto! Cargando...")
+                    time.sleep(1) # Pequeña pausa para ver el mensaje
+                    st.rerun() # Recargar la página para mostrar el dashboard
+                else:
+                    st.error("Usuario o contraseña incorrectos.")
+
+    return False
+
+# --- SI NO ESTÁ LOGUEADO, DETENER EJECUCIÓN AQUÍ ---
+if not check_password():
+    st.stop()  # 🛑 Todo el código debajo de esto no se ejecuta si no hay login
+
+# ==============================================================================
+#  A PARTIR DE AQUÍ VA TU DASHBOARD NORMAL (SOLO SE VE SI check_password ES TRUE)
+# ==============================================================================
+
+# --- Título y Logout ---
+col_title, col_logout = st.columns([6, 1])
+with col_title:
+    st.title("📊 Tablero de Control Datos de la Suerte")
+with col_logout:
+    if st.button("Cerrar Sesión"):
+        st.session_state['password_correct'] = False
+        st.rerun()
 
 # --- BARRA LATERAL (FILTROS GLOBALES) ---
 st.sidebar.header("📅 Configuración de Fechas")
-# Por defecto: últimos 30 días
 today = datetime.date.today()
 default_start = today - datetime.timedelta(days=30)
 
@@ -34,13 +83,13 @@ def get_db_connection():
         st.error(f"Error DB: {e}")
         return None
 
-# --- FUNCIONES GOOGLE ANALYTICS 4 (Con Fechas Dinámicas) ---
+# --- FUNCIONES GOOGLE ANALYTICS 4 ---
 def get_ga4_client():
     creds_dict = dict(st.secrets["google_auth"])
     credentials = service_account.Credentials.from_service_account_info(creds_dict)
     return BetaAnalyticsDataClient(credentials=credentials)
 
-# Función auxiliar para convertir fecha python a string GA4 ('YYYY-MM-DD')
+# Función auxiliar para convertir fecha python a string GA4
 def format_date(d):
     return d.strftime("%Y-%m-%d")
 
@@ -80,11 +129,12 @@ def get_ga4_hourly(property_id, start, end):
     data = [{"Hora": int(r.dimension_values[0].value), "Usuarios": int(r.metric_values[0].value)} for r in response.rows]
     return pd.DataFrame(data).sort_values("Hora")
 
-# --- LAYOUT DEL DASHBOARD ---
+
+# --- LAYOUT PRINCIPAL ---
 
 tab1, tab2 = st.tabs(["🗄️ Base de Datos (SQL)", "📈 Tráfico Web (GA4)"])
 
-# === PESTAÑA 1: BASE DE DATOS (Filtrada por sidebar) ===
+# === PESTAÑA 1: BASE DE DATOS ===
 with tab1:
     st.header("Explorador de Registros")
     engine = get_db_connection()
@@ -97,70 +147,68 @@ with tab1:
                 col_sel, col_info = st.columns([1, 3])
                 selected_table = col_sel.selectbox("Selecciona tabla:", tables_df['table_name'], index=0)
                 
-                # Cargamos datos
                 query = text(f'SELECT * FROM "{selected_table}"')
                 df = pd.read_sql(query, conn)
                 
                 if 'created_at' in df.columns:
-                    # Filtramos usando las variables globales start_date y end_date
                     df['created_at'] = pd.to_datetime(df['created_at'])
                     mask = (df['created_at'].dt.date >= start_date) & (df['created_at'].dt.date <= end_date)
                     df_filtered = df.loc[mask]
                     
                     col_info.info(f"Mostrando {len(df_filtered)} registros entre {start_date} y {end_date}")
                     
-                    st.subheader("Evolución de Registros (Periodo Seleccionado)")
+                    st.subheader("Evolución de Registros")
                     if not df_filtered.empty:
                         daily_counts = df_filtered.groupby(df_filtered['created_at'].dt.date).size().reset_index(name='Registros')
                         daily_counts.columns = ['Fecha', 'Registros']
                         st.bar_chart(daily_counts.set_index('Fecha'), color="#22c55e")
-                    else:
-                        st.warning("No hay registros en estas fechas.")
-                        
+                    
                     st.dataframe(df_filtered, width='stretch')
                 else:
                     st.warning("Esta tabla no tiene columna de fecha, se muestran todos los datos.")
                     st.dataframe(df, width='stretch')
 
-# === PESTAÑA 2: ANALYTICS (Filtrada por sidebar) ===
+# === PESTAÑA 2: ANALYTICS ===
 with tab2:
-    prop_id = st.secrets["analytics"]["property_id"]
-    st.header(f"Rendimiento del Sitio ({start_date} al {end_date})")
+    try:
+        prop_id = st.secrets["analytics"]["property_id"]
+        st.header(f"Rendimiento del Sitio ({start_date} al {end_date})")
 
-    # Pasamos las fechas globales a las funciones
-    row = get_ga4_kpis(prop_id, start_date, end_date)
-    
-    if row:
-        users = int(row.metric_values[0].value)
-        sessions = int(row.metric_values[1].value)
-        views = int(row.metric_values[2].value)
-        avg_time_sec = float(row.metric_values[3].value)
-        bounce = float(row.metric_values[4].value)
-        avg_time_fmt = str(datetime.timedelta(seconds=int(avg_time_sec)))
+        row = get_ga4_kpis(prop_id, start_date, end_date)
         
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Total Usuarios", f"{users:,}")
-        k2.metric("Sesiones", f"{sessions:,}")
-        k3.metric("Vistas", f"{views:,}")
-        k4.metric("Duración Media", avg_time_fmt)
-        k5.metric("% Rebote", f"{bounce*100:.2f}%")
-        st.divider()
+        if row:
+            users = int(row.metric_values[0].value)
+            sessions = int(row.metric_values[1].value)
+            views = int(row.metric_values[2].value)
+            avg_time_sec = float(row.metric_values[3].value)
+            bounce = float(row.metric_values[4].value)
+            avg_time_fmt = str(datetime.timedelta(seconds=int(avg_time_sec)))
+            
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Total Usuarios", f"{users:,}")
+            k2.metric("Sesiones", f"{sessions:,}")
+            k3.metric("Vistas", f"{views:,}")
+            k4.metric("Duración Media", avg_time_fmt)
+            k5.metric("% Rebote", f"{bounce*100:.2f}%")
+            st.divider()
 
-    col_main, col_side = st.columns([2, 1])
+        col_main, col_side = st.columns([2, 1])
 
-    with col_main:
-        st.subheader("Patrón Horario (Promedio del periodo)")
-        df_hourly = get_ga4_hourly(prop_id, start_date, end_date)
-        if not df_hourly.empty:
-            st.area_chart(df_hourly.set_index("Hora"), color="#3b82f6") 
-    
-    with col_side:
-        st.subheader("Top Páginas y Fuentes")
-        df_pages = get_ga4_pages_source(prop_id, start_date, end_date)
-        if not df_pages.empty:
-            st.dataframe(
-                df_pages, 
-                width='stretch', 
-                hide_index=True,
-                column_config={"Usuarios": st.column_config.ProgressColumn("Usuarios", format="%d", min_value=0, max_value=int(df_pages["Usuarios"].max()))}
-            )
+        with col_main:
+            st.subheader("Patrón Horario")
+            df_hourly = get_ga4_hourly(prop_id, start_date, end_date)
+            if not df_hourly.empty:
+                st.area_chart(df_hourly.set_index("Hora"), color="#3b82f6") 
+        
+        with col_side:
+            st.subheader("Top Páginas")
+            df_pages = get_ga4_pages_source(prop_id, start_date, end_date)
+            if not df_pages.empty:
+                st.dataframe(
+                    df_pages, 
+                    width='stretch', 
+                    hide_index=True,
+                    column_config={"Usuarios": st.column_config.ProgressColumn("Usuarios", format="%d", min_value=0, max_value=int(df_pages["Usuarios"].max()))}
+                )
+    except KeyError:
+        st.error("⚠️ Faltan configurar las credenciales de Analytics en secrets.toml")
